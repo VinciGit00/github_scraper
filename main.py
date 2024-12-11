@@ -4,6 +4,14 @@ from typing import List, Optional
 import pandas as pd
 from scrapegraph_py import SyncClient
 import json
+import logging
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 # Define Pydantic models for GitHub trending developers
 class Developer(BaseModel):
@@ -22,9 +30,6 @@ class Repository(BaseModel):
     stars: int = Field(description="Number of stars")
     language: Optional[str] = Field(description="Primary programming language")
 
-class TrendingRepositories(BaseModel):
-    repositories: List[Repository] = Field(description="List of trending repositories from GitHub")
-
 def fetch_trending_developers(api_key):
     # Initialize the client
     sgai_client = SyncClient(api_key=api_key)
@@ -33,16 +38,27 @@ def fetch_trending_developers(api_key):
         # SmartScraper request with output schema
         response = sgai_client.smartscraper(
             website_url="https://github.com/trending/developers",
-            user_prompt="Extract information about trending developers including their username, full name, popular repository, repository description, and company. Parse the data from the articles with class 'Box-row'.",
-            output_schema=TrendingDevelopers,
+            user_prompt="Extract information about trending developers including their username, full name, popular repository, repository description, and company. Parse the data from the articles with class 'Box-row'. Return the data in a copiable JSON format.",
         )
         
         sgai_client.close()
-        print(response)
-        return TrendingDevelopers(**response['result'])
+        logger.info("Successfully fetched trending developers data")
+        
+        # Add formatted JSON output and download button
+        if response and 'result' in response:
+            json_str = json.dumps(response['result'], indent=2)
+            st.download_button(
+                label="Download Raw JSON",
+                data=json_str,
+                file_name="trending_developers_raw.json",
+                mime="application/json"
+            )
+            st.code(json_str, language='json')
+        
+        return response['result']
     
     except Exception as e:
-        st.error(f"Error fetching data: {str(e)}")
+        logger.error(f"Error fetching trending developers data: {str(e)}")
         if 'sgai_client' in locals():
             sgai_client.close()
         return None
@@ -67,14 +83,25 @@ def fetch_github_explore(api_key):
     try:
         response = sgai_client.smartscraper(
             website_url="https://github.com/explore",
-            user_prompt="Extract trending repositories including name, description, stars, and programming language",
-            output_schema=TrendingRepositories,
+            user_prompt="Extract trending repositories including name, description, stars, and programming language. Return the data in a copiable JSON format.",
         )
-        print(response)
+        logger.info("Successfully fetched explore data")
+        
+        # Add formatted JSON output and download button
+        if response and 'result' in response:
+            json_str = json.dumps(response['result'], indent=2)
+            st.download_button(
+                label="Download Raw JSON",
+                data=json_str,
+                file_name="trending_repos_raw.json",
+                mime="application/json"
+            )
+            st.code(json_str, language='json')
+        
         sgai_client.close()
-        return TrendingRepositories(**response['result'])
+        return response['result']
     except Exception as e:
-        st.error(f"Error fetching explore data: {str(e)}")
+        logger.error(f"Error fetching explore data: {str(e)}")
         if 'sgai_client' in locals():
             sgai_client.close()
         return None
@@ -131,15 +158,39 @@ def main():
             st.session_state.trending_data = fetch_trending_developers(api_key)
         
         if st.session_state.trending_data:
+            # Debug: Print the structure of the data
+            st.write("Raw data structure:", st.session_state.trending_data)
+            
             # Convert to DataFrame for better display
             developers_data = []
-            for dev in st.session_state.trending_data.developers:
+            
+            # Try to parse if it's a string
+            if isinstance(st.session_state.trending_data, str):
+                try:
+                    raw_developers = json.loads(st.session_state.trending_data)
+                except json.JSONDecodeError:
+                    st.error("Invalid JSON data received")
+                    raw_developers = []
+            else:
+                raw_developers = st.session_state.trending_data
+            
+            # Ensure we're working with a list
+            if not isinstance(raw_developers, list):
+                raw_developers = [raw_developers]
+            
+            for dev in raw_developers:
+                if isinstance(dev, str):
+                    try:
+                        dev = json.loads(dev)
+                    except json.JSONDecodeError:
+                        continue
+                
                 developers_data.append({
-                    "Username": dev.username,
-                    "Full Name": dev.full_name or "N/A",
-                    "Popular Repository": dev.popular_repo or "N/A",
-                    "Repository Description": dev.repo_description or "N/A",
-                    "Company": dev.company or "N/A"
+                    "Username": dev['username'] if isinstance(dev, dict) and 'username' in dev else 'N/A',
+                    "Full Name": dev['full_name'] if isinstance(dev, dict) and 'full_name' in dev else 'N/A',
+                    "Popular Repository": dev['popular_repo'] if isinstance(dev, dict) and 'popular_repo' in dev else 'N/A',
+                    "Repository Description": dev['repo_description'] if isinstance(dev, dict) and 'repo_description' in dev else 'N/A',
+                    "Company": dev['company'] if isinstance(dev, dict) and 'company' in dev else 'N/A'
                 })
             
             df = pd.DataFrame(developers_data)
@@ -166,20 +217,7 @@ def main():
             # JSON download button
             with col2:
                 # Convert the data to JSON format
-                json_data = json.dumps(
-                    {
-                        "developers": [
-                            {
-                                "username": dev.username,
-                                "full_name": dev.full_name,
-                                "popular_repo": dev.popular_repo,
-                                "repo_description": dev.repo_description,
-                                "company": dev.company
-                            } for dev in st.session_state.trending_data.developers
-                        ]
-                    },
-                    indent=2
-                )
+                json_data = json.dumps(st.session_state.trending_data, indent=2)
                 st.download_button(
                     label="Download as JSON",
                     data=json_data,
@@ -189,23 +227,50 @@ def main():
         else:
             st.warning("No data available. Please try refreshing.")
 
-    # Tab 2: Explore (moved from tab3)
+    # Tab 2: Explore
     with tab2:
         if st.button("Refresh Explore Data"):
-            st.session_state.explore_data = fetch_github_explore(api_key)
+            data = fetch_github_explore(api_key)
+            logger.info("Refreshing explore data")
+            logger.debug(f"Fetched explore data: {data}")
+            st.session_state.explore_data = data
         
         if 'explore_data' not in st.session_state:
             st.session_state.explore_data = fetch_github_explore(api_key)
         
         if st.session_state.explore_data:
+            # Debug: Print the structure of the data
+            st.write("Raw explore data:", st.session_state.explore_data)
+            
             # Convert explore data to DataFrame
             repos_data = []
-            for repo in st.session_state.explore_data.repositories:
+            
+            # Handle string data
+            if isinstance(st.session_state.explore_data, str):
+                try:
+                    raw_repos = json.loads(st.session_state.explore_data)
+                except json.JSONDecodeError:
+                    st.error("Invalid JSON data received")
+                    raw_repos = []
+            else:
+                raw_repos = st.session_state.explore_data
+            
+            # Ensure we're working with a list
+            if not isinstance(raw_repos, list):
+                raw_repos = [raw_repos]
+            
+            for repo in raw_repos:
+                if isinstance(repo, str):
+                    try:
+                        repo = json.loads(repo)
+                    except json.JSONDecodeError:
+                        continue
+                
                 repos_data.append({
-                    "Repository": repo.name,
-                    "Description": repo.description or "N/A",
-                    "Stars": repo.stars,
-                    "Language": repo.language or "Unknown"
+                    "Repository": repo.get('name', 'N/A'),
+                    "Description": repo.get('description', 'N/A'),
+                    "Stars": repo.get('stars', 0),
+                    "Language": repo.get('language', 'Unknown')
                 })
             
             explore_df = pd.DataFrame(repos_data)
@@ -228,33 +293,6 @@ def main():
                 }
             )
             
-            # Create pie chart of programming languages
-            st.subheader("Programming Languages Distribution")
-            
-            # Count languages and handle repositories with no language
-            language_counts = explore_df['Language'].value_counts()
-            
-            # Create pie chart using Streamlit
-            fig = {
-                "data": [{
-                    "values": language_counts.values,
-                    "labels": language_counts.index,
-                    "type": "pie",
-                    "hole": 0.4,  # Makes it a donut chart
-                    "hoverinfo": "label+percent",
-                    "textinfo": "value"
-                }],
-                "layout": {
-                    "showlegend": True,
-                    "width": 800,
-                    "height": 500,
-                    "margin": {"t": 0, "b": 0, "l": 0, "r": 0},
-                    "legend": {"orientation": "h", "y": -0.1}
-                }
-            }
-            
-            st.plotly_chart(fig, use_container_width=True)
-            
             # Add download buttons for Explore data
             col1, col2 = st.columns(2)
             with col1:
@@ -268,19 +306,7 @@ def main():
                 )
             with col2:
                 # JSON download
-                json_data = json.dumps(
-                    {
-                        "repositories": [
-                            {
-                                "name": repo.name,
-                                "description": repo.description,
-                                "stars": repo.stars,
-                                "language": repo.language
-                            } for repo in st.session_state.explore_data.repositories
-                        ]
-                    },
-                    indent=2
-                )
+                json_data = json.dumps(st.session_state.explore_data, indent=2)
                 st.download_button(
                     label="Download Repositories as JSON",
                     data=json_data,
@@ -392,3 +418,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
